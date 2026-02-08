@@ -54,6 +54,95 @@ def make_dec_input_with_bos_flag(Y, device=None):
     return torch.cat([dec_val, dec_flag], dim=-1)  # (B,m,2)
 
 
+def make_dec_input_with_bos_flag_V2(Y: torch.Tensor, device=None) -> torch.Tensor:
+    """
+    通用版（仅考虑 Y 为 (B,m) 或 (B,m,d)):
+    输入:
+      Y:
+        - (B, m)       或
+        - (B, m, d)
+    输出:
+      dec_in:
+        - 若 Y 是 (B,m)     -> (B, m, 2)   (右移值 1 维 + bos 1 维)
+        - 若 Y 是 (B,m,d)   -> (B, m, d+1) (右移值 d 维 + bos 1 维)
+    规则:
+      - teacher forcing 右移:t=0 用 0 占位,t>0 用 Y[:, t-1]
+      - bos flag: t=0 为 1, 其余为 0, 作为最后一维额外通道拼接
+    """
+    if device is None:
+        device = Y.device
+    if Y.dim() not in (2, 3):
+        raise ValueError(f"只支持 Y 为 (B,m) 或 (B,m,d)，但收到 shape={tuple(Y.shape)}")
+
+    # (B,m) -> (B,m,1)
+    if Y.dim() == 2:
+        Y = Y.unsqueeze(-1)  # (B,m,1)
+
+    B, m, d = Y.shape
+
+    # shift
+    dec_val0 = torch.zeros((B, 1, d), device=device, dtype=Y.dtype)
+    dec_val = torch.cat([dec_val0, Y[:, :-1, :]], dim=1)  # (B,m,d)
+    # cat bos flag
+    dec_flag = torch.zeros((B, m, 1), device=device, dtype=Y.dtype)
+    dec_flag[:, 0, 0] = 1.0
+    dec_in = torch.cat([dec_val, dec_flag], dim=-1)  # (B,m,d+1)
+    return dec_in
+
+
+def make_dec_input_with_bos_flag_V3(
+    X: torch.Tensor, Y: torch.Tensor, device=None
+) -> torch.Tensor:
+    """
+    update: dec_val0 is the last time step of X instead of zeros,
+        to provide a smoother transition from encoder to decoder inputs.
+    通用版（仅考虑 Y 为 (B,m) 或 (B,m,d)):
+    输入:
+      Y:
+        - (B, m)       或
+        - (B, m, d)
+    输出:
+      dec_in:
+        - 若 Y 是 (B,m)     -> (B, m, 2)   (右移值 1 维 + bos 1 维)
+        - 若 Y 是 (B,m,d)   -> (B, m, d+1) (右移值 d 维 + bos 1 维)
+    规则:
+      - teacher forcing 右移:t=0 用 0 占位,t>0 用 Y[:, t-1]
+      - bos flag: t=0 为 1, 其余为 0, 作为最后一维额外通道拼接
+    """
+    if device is None:
+        device = Y.device
+    if Y.dim() not in (2, 3):
+        raise ValueError(f"只支持 Y 为 (B,m) 或 (B,m,d)，但收到 shape={tuple(Y.shape)}")
+
+    # (B,m) -> (B,m,1)
+
+    if X.dim() == 2:
+        X = X.unsqueeze(-1)  # (B,n,1)
+    if Y.dim() == 2:
+        Y = Y.unsqueeze(-1)  # (B,m,1)
+    if X.dim() != 3 or Y.dim() != 3:
+        raise ValueError(
+            f"期望 X,Y 为 (B,T,d)；但得到 X{tuple(X.shape)} Y{tuple(Y.shape)}"
+        )
+
+    B, m, d = Y.shape
+    if X.shape[0] != B:
+        raise ValueError(f"batch 不一致: X{tuple(X.shape)} Y{tuple(Y.shape)}")
+    if X.shape[2] != d:
+        raise ValueError(f"特征维不一致: X_last_dim={X.shape[2]} vs Y_last_dim={d}")
+
+    B, m, d = Y.shape
+
+    # shift
+    dec_val0 = X[:, -1:, :]  # use the last time step of X instead of zeros
+    dec_val = torch.cat([dec_val0, Y[:, :-1, :]], dim=1)  # (B,m,d)
+    # cat bos flag
+    dec_flag = torch.zeros((B, m, 1), device=device, dtype=Y.dtype)
+    dec_flag[:, 0, 0] = 1.0
+    dec_in = torch.cat([dec_val, dec_flag], dim=-1)  # (B,m,d+1)
+    return dec_in
+
+
 def train_seq2seq_regression(
     net,
     train_loader,
@@ -72,18 +161,22 @@ def train_seq2seq_regression(
         tr_loss_sum, tr_count = 0.0, 0
 
         for X, X_len, Y, Y_len in train_loader:
-            X = X.to(device)  # (B,n,1)
+            X = X.to(device)  # (B,n,2)
             X_len = X_len.to(device)  # (B,) or scalar per sample
-            Y = Y.to(device)  # (B,m,1)
+            Y = Y.to(device)  # (B,m,2)
             Y_len = Y_len.to(device)
 
-            dec_in = make_dec_input_with_bos_flag(Y)  # (B,m,2)
+            dec_in = make_dec_input_with_bos_flag_V3(X, Y)  # (B,m,3)
 
             opt.zero_grad()
-            out = net(X, dec_in, X_len)  # (B,m,2) if decoder input_size=2
+            out = net(X, dec_in, X_len)  # (B,m,1) if decoder input_size=3
             y_hat = out
 
-            loss = loss_fn(y_hat, Y, Y_len)
+            # print("y_hat", y_hat.shape)
+            # print("Y    ", Y.shape)
+            # print("Y[:,:,1]", Y[:, :, 1:2].shape)
+
+            loss = loss_fn(y_hat, Y[:, :, 1:2], Y_len)
             loss.backward()
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(net.parameters(), grad_clip)
@@ -104,10 +197,14 @@ def train_seq2seq_regression(
                 Y = Y.to(device)
                 Y_len = Y_len.to(device)
 
-                dec_in = make_dec_input_with_bos_flag(Y)
+                dec_in = make_dec_input_with_bos_flag_V3(X, Y)
                 out = net(X, dec_in, X_len)
-                y_hat = out[..., :1]
-                loss = loss_fn(y_hat, Y, Y_len)
+                y_hat = out
+                # print("y_hat", y_hat.shape)
+                # print("Y    ", Y.shape)
+                # print("Y[:,:,1]", Y[:, :, 1:2].shape)
+
+                loss = loss_fn(y_hat, Y[:, :, 1:2], Y_len)
 
                 va_loss_sum += float(loss) * X.shape[0]
                 va_count += X.shape[0]
