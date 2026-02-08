@@ -33,7 +33,7 @@ def generate_poly_series_V2(
     t = np.arange(T, dtype=np.float32)
     x = t / (T - 1.0)
     b1, b2, b3, b4 = coeffs
-    y = b1 * x + b2 * (x**2) + b3 * (x**3) + b4 * (x**4)
+    y = b1 * x + b2 * (x**2) + b3 * (x**3) + b4 * (x**4) + np.sin(x * 10 * np.pi) * 0.1
     y += rng.normal(0.0, noise_std, size=T).astype(np.float32)
     xy = np.stack((x, y), axis=1)
     return xy
